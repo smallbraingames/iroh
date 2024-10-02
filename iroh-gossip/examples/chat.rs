@@ -106,14 +106,21 @@ async fn main() -> Result<()> {
     };
     println!("> using relay servers: {}", fmt_relay_mode(&relay_mode));
 
+    let builder = iroh_net::discovery::pkarr::dht::DhtDiscovery::builder()
+        .dht(true)
+        .n0_dns_pkarr_relay();
+    let discovery = builder.secret_key(secret_key.clone()).build().unwrap();
+
     // build our magic endpoint
     let endpoint = Endpoint::builder()
         .secret_key(secret_key)
         .alpns(vec![GOSSIP_ALPN.to_vec()])
+        .discovery(Box::new(discovery))
         .relay_mode(relay_mode)
         .bind_addr_v4(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, args.bind_port))
         .bind()
         .await?;
+
     println!("> our node id: {}", endpoint.node_id());
 
     let my_addr = endpoint.node_addr().await?;
@@ -163,8 +170,7 @@ async fn main() -> Result<()> {
     // broadcast each line we type
     println!("> type a message and hit enter to broadcast...");
     while let Some(text) = line_rx.recv().await {
-        let message = Message::Message { text: text.clone() };
-        let encoded_message = SignedMessage::sign_and_encode(endpoint.secret_key(), &message)?;
+        let encoded_message = Bytes::from(String::from(text.clone()).into_bytes());
         sender.broadcast(encoded_message).await?;
         println!("> sent: {text}");
     }
@@ -174,22 +180,16 @@ async fn main() -> Result<()> {
 
 async fn subscribe_loop(mut receiver: GossipReceiver) -> Result<()> {
     // init a peerid -> name hashmap
-    let mut names = HashMap::new();
     while let Some(event) = receiver.try_next().await? {
         if let Event::Gossip(GossipEvent::Received(msg)) = event {
-            let (from, message) = SignedMessage::verify_and_decode(&msg.content)?;
-            match message {
-                Message::AboutMe { name } => {
-                    names.insert(from, name.clone());
-                    println!("> {} is now known as {}", from.fmt_short(), name);
+            let decoded_message = String::from_utf8(msg.content.to_vec());
+            match decoded_message {
+                Ok(msg) => println!("> received: {msg}"),
+                Err(_) => {
+                    println!("> received a message that is not valid utf8");
+                    continue;
                 }
-                Message::Message { text } => {
-                    let name = names
-                        .get(&from)
-                        .map_or_else(|| from.fmt_short(), String::to_string);
-                    println!("{}: {}", name, text);
-                }
-            }
+            };
         }
     }
     Ok(())
