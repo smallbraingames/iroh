@@ -5,8 +5,13 @@ use anyhow::Result;
 use colored::Colorize;
 use indicatif::{ProgressBar, ProgressDrawTarget, ProgressStyle};
 use iroh::{
-    net::relay::{RelayMap, RelayMode},
-    node::{Node, RpcStatus, DEFAULT_RPC_ADDR},
+    net::{
+        discovery::pkarr::dht::DhtDiscovery,
+        endpoint::{TransportConfig, VarInt},
+        key::SecretKey,
+        relay::{RelayMap, RelayMode},
+    },
+    node::{DiscoveryConfig, Node, RpcStatus, DEFAULT_RPC_ADDR},
 };
 use std::{
     future::Future,
@@ -153,9 +158,26 @@ pub(crate) async fn start_node(
     };
 
     let rpc_addr = rpc_addr.unwrap_or(DEFAULT_RPC_ADDR);
+    let secret_key_path = iroh_data_root.join("keypair");
+    println!("secret key path {}", secret_key_path.display());
+
+    let secret_key = SecretKey::try_from_openssh(std::fs::read(&secret_key_path)?)?;
+    println!("secret key: {}", secret_key.to_string());
+
+    let builder = DhtDiscovery::builder().dht(true).n0_dns_pkarr_relay();
+    let discovery = builder.secret_key(secret_key).build().unwrap();
+    let discovery_config = DiscoveryConfig::Custom(Box::new(discovery));
+
+    let mut transport_config = TransportConfig::default();
+    transport_config.keep_alive_interval(Some(Duration::from_millis(250)));
+    transport_config.max_idle_timeout(Some(VarInt::from_u32(1_000).into()));
+
+    println!("starting w/ pkarr discovery");
     Node::persistent(iroh_data_root)
         .await?
         .relay_mode(relay_mode)
+        .transport_config(transport_config)
+        .node_discovery(discovery_config)
         .enable_docs()
         .enable_rpc_with_addr(rpc_addr)
         .await?
